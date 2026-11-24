@@ -1,151 +1,118 @@
+# app.py
 import streamlit as st
+import streamlit.components.v1 as components
 import cv2
-from deepface import DeepFace
-import pandas as pd
-from datetime import datetime
+import numpy as np
+from PIL import Image
+from ml_engine import predict_emotion
+from utils import FPSCounter, create_emotion_dataframe, format_log_entry, load_asset
 
-st.set_page_config(
-    page_title="SentioVision AI Dashboard",
-    page_icon="🧠",
-    layout="wide"
-)
+st.set_page_config(page_title="SentioVision AI", layout="wide")
 
-st.title("🧠 SentioVision: Real-Time Facial Emotion & Mood Analytics")
-st.markdown("Live Computer Vision & Deep Learning Dashboard powered by **DeepFace (CNN)** & **OpenCV**")
-st.markdown("---")
+# 1. Alag files se HTML, CSS aur JS load karna
+css_code = load_asset("assets/style.css")
+html_code = load_asset("assets/header.html")
+js_code = load_asset("assets/script.js")
 
-st.sidebar.header("⚙️ Control Panel")
-run_camera = st.sidebar.checkbox("📷 Start Live Webcam", value=False)
+st.markdown(f"<style>{css_code}</style>", unsafe_allow_html=True)
+components.html(f"{html_code}<script>{js_code}</script>", height=105)
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📥 Export Analytics Data")
+# Sidebar Controls
+st.sidebar.header("Control Panel")
+mode = st.sidebar.radio("Input Mode Chunein:", ["Image Upload (Fast)", "Live Webcam"])
 
-if "emotion_counts" not in st.session_state:
-    st.session_state.emotion_counts = {
-        "happy": 0, "sad": 0, "angry": 0, "neutral": 0, "surprise": 0, "fear": 0, "disgust": 0
-    }
+if "emotion_log" not in st.session_state:
+    st.session_state.emotion_log = []
 
-if "session_logs" not in st.session_state:
-    st.session_state.session_logs = []
-
-if st.sidebar.button("🔄 Reset Analytics"):
-    st.session_state.emotion_counts = {k: 0 for k in st.session_state.emotion_counts}
-    st.session_state.session_logs = []
-    st.sidebar.success("Analytics data reset!")
-
-if len(st.session_state.session_logs) > 0:
-    log_df = pd.DataFrame(st.session_state.session_logs)
-    csv_data = log_df.to_csv(index=False).encode('utf-8')
-    st.sidebar.download_button(
-        label="📄 Download Session Report (CSV)",
-        data=csv_data,
-        file_name=f"SentioVision_Report_{datetime.now().strftime('%H%M%S')}.csv",
-        mime="text/csv"
-    )
-
-st.sidebar.markdown("---")
-st.sidebar.info("💡 **Tip:** Chehre par achhi lighting rakhein taaki ML model sahi prediction kar sake.")
-
-recommendations = {
-    "happy": ("🌟 Great Energy Detected!", "Aapka mood kaafi positive hai. Creative ya productive kaam karne ke liye yeh best time hai."),
-    "sad": ("💙 Cheer Up!", "Thoda low feel ho raha hai? 5 minute ka break lein, paani piyein ya apna favorite music sunein."),
-    "angry": ("🧘 Take a Deep Breath", "Stress ya gussa detect hua hai. Screen se thodi der door hatein aur relax karein."),
-    "surprise": ("😲 Something Unexpected?", "Lagta hai kisi cheez ne aapka dhyan achanak khinch liya hai!"),
-    "neutral": ("🎯 Focused & Calm", "Aapka mind bilkul shaant aur balanced hai. Coding aur padhai ke liye yeh ideal state hai."),
-    "fear": ("🛡️ Stay Calm", "Sab kuch control mein hai. Gehri saans lein aur relax rahein."),
-    "disgust": ("🤔 Uncomfortable?", "Aas-paas ka mahol thoda badalne ki koshish karein.")
-}
-
-col1, col2 = st.columns([1.3, 1])
-
-with col1:
-    st.subheader("🎥 Live AI Vision Feed")
-    frame_placeholder = st.empty()
-
-with col2:
-    st.subheader("📊 Live Mood & Confidence Metrics")
-    m1, m2 = st.columns(2)
-    emotion_metric = m1.empty()
-    confidence_metric = m2.empty()
+# --- MODE 1: IMAGE UPLOAD ---
+if mode == "Image Upload (Fast)":
+    uploaded_file = st.file_uploader("Koi bhi face photo upload karein", type=["jpg", "jpeg", "png"])
     
-    st.markdown("---")
-    recommendation_box = st.empty()
-    
-    st.markdown("### 📈 Real-Time Emotion Distribution")
-    chart_placeholder = st.empty()
+    if uploaded_file is not None:
+        image = Image.open(uploaded_file)
+        frame = np.array(image)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-if run_camera:
-    # DirectShow backend (cv2.CAP_DSHOW) Windows par camera ko turant kholta hai
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    
-    if not cap.isOpened():
+        with st.spinner("ML Model emotion analyze kar raha hai..."):
+            processed_frame, detections = predict_emotion(frame)
+
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB), caption="Analyzed Output", use_container_width=True)
+        
+        with col2:
+            st.subheader("Detection Results")
+            if detections:
+                for idx, d in enumerate(detections):
+                    st.markdown(f"""
+                    <div class="emotion-card">
+                        <h4 style="margin:0; color:#38bdf8;">Face #{idx+1}: {d['emotion'].upper()}</h4>
+                        <p style="margin:4px 0 0 0; color:#cbd5e1;">Confidence Score: <b>{d['confidence']}%</b></p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.bar_chart(d['all_scores'])
+            else:
+                st.warning("Koi face detect nahi hua.")
+
+# --- MODE 2: LIVE WEBCAM ---
+elif mode == "Live Webcam":
+    run_cam = st.sidebar.checkbox("Camera Start Karein")
+    col1, col2 = st.columns([2, 1])
+    frame_window = col1.image([])
+    info_box = col2.empty()
+
+    if run_cam:
         cap = cv2.VideoCapture(0)
-        
-    frame_count = 0
-    dominant_emotion = "neutral"
-    confidence = 0.0
-    box = None
-    
-    while run_camera:
-        ret, frame = cap.read()
-        if not ret:
-            st.error("⚠️ Webcam open nahi ho pa raha! Check karein ki koi aur app (Zoom/Camera) camera use to nahi kar raha.")
-            break
-        
-        frame = cv2.flip(frame, 1)
-        
-        # Pehle camera dikhao, har 8th frame par fast Emotion AI chalao
-        if frame_count % 8 == 0:
-            try:
-                results = DeepFace.analyze(
-                    frame,
-                    actions=['emotion'],
-                    enforce_detection=False,
-                    silent=True
-                )
+        fps_counter = FPSCounter()
+
+        while run_cam:
+            ret, frame = cap.read()
+            if not ret:
+                st.error("Webcam access nahi ho pa raha hai.")
+                break
+
+            processed_frame, detections = predict_emotion(frame)
+            fps = fps_counter.get_fps()
+
+            if detections:
+                top_emotion = detections[0]['emotion']
+                conf = detections[0]['confidence']
+                st.session_state.emotion_log.append(format_log_entry(top_emotion, conf))
                 
-                if results:
-                    res = results[0]
-                    dominant_emotion = res['dominant_emotion']
-                    confidence = round(res['emotion'][dominant_emotion], 1)
-                    
-                    if dominant_emotion in st.session_state.emotion_counts:
-                        st.session_state.emotion_counts[dominant_emotion] += 1
-                    
-                    st.session_state.session_logs.append({
-                        "Timestamp": datetime.now().strftime("%H:%M:%S"),
-                        "Emotion": dominant_emotion,
-                        "Confidence_%": confidence
-                    })
-                    
-                    region = res['region']
-                    box = (region['x'], region['y'], region['w'], region['h'])
-                    
-            except Exception:
-                pass
-        
-        if box:
-            x, y, w, h = box
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 127), 2)
-            label = f"{dominant_emotion.upper()} ({confidence}%)"
-            cv2.putText(frame, label, (x, max(20, y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 127), 2)
-        
-        frame_count += 1
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-        
-        emotion_metric.metric("Detected Mood", dominant_emotion.capitalize())
-        confidence_metric.metric("AI Confidence", f"{confidence}%")
-        
-        title, msg = recommendations.get(dominant_emotion, ("🤖 Scanning...", "Analyzing facial features..."))
-        recommendation_box.info(f"**{title}**\n\n{msg}")
-        
-        df_emotions = pd.DataFrame(
-            list(st.session_state.emotion_counts.items()),
-            columns=["Emotion", "Frames Detected"]
-        ).set_index("Emotion")
-        chart_placeholder.bar_chart(df_emotions)
-        
-    cap.release()
+                info_box.markdown(f"""
+                <div class="emotion-card">
+                    <span class="status-badge">FPS: {fps}</span>
+                    <h2 style="margin:10px 0 5px 0; color:#38bdf8;">{top_emotion.upper()}</h2>
+                    <p style="margin:0; color:#94a3b8;">Confidence: <b>{conf}%</b></p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                info_box.markdown(f"""
+                <div class="emotion-card">
+                    <span class="status-badge">FPS: {fps}</span>
+                    <p style="margin-top:10px; color:#94a3b8;">Scanning for faces...</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            frame_window.image(cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB))
+
+        cap.release()
+
+# --- ANALYTICS SECTION ---
+st.divider()
+st.subheader("Session Emotion Analytics")
+if st.session_state.emotion_log:
+    df = create_emotion_dataframe(st.session_state.emotion_log)
+    st.dataframe(df.tail(5), use_container_width=True)
+    
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Report (CSV)", data=csv, file_name="sentiovision_report.csv", mime="text/csv")
 else:
-    frame_placeholder.info("👈 Project shuru karne ke liye left sidebar mein **'Start Live Webcam'** par tick karein.")
+    st.info("Abhi tak koi emotion record nahi hua hai.")
+    # --- DASHBOARD FOOTER ---
+st.divider()
+st.markdown("""
+<div style="text-align: center; padding: 12px; color: #94a3b8; font-size: 14px;">
+    Designed by <b style="color: #38bdf8;">Abhinav</b> | Student of <b>MCA (AI & Data Science)</b> in <b>Rayat Bahra University</b>
+</div>
+""", unsafe_allow_html=True)
